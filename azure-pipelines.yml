@@ -1,0 +1,98 @@
+trigger:
+  - "*"
+
+pool:
+  vmImage: "ubuntu-latest"
+  demands:
+    - npm
+
+variables:
+  buildConfiguration: "Release"
+  wwwrootDir: "Tailspin.SpaceGame.Web/wwwroot"
+  dotnetSdkVersion: "6.x"
+
+steps:
+  - task: UseDotNet@2
+    displayName: "Use .NET SDK $(dotnetSdkVersion)"
+    inputs:
+      version: "$(dotnetSdkVersion)"
+
+  - task: Npm@1
+    displayName: "Run npm install"
+    inputs:
+      verbose: false
+
+  - script: "./node_modules/.bin/node-sass $(wwwrootDir) --output $(wwwrootDir)"
+    displayName: "Compile Sass assets"
+
+  - task: gulp@1
+    displayName: "Run gulp tasks"
+
+  - script: 'echo "$(Build.DefinitionName), $(Build.BuildId), $(Build.BuildNumber)" > buildinfo.txt'
+    displayName: "Write build info"
+    workingDirectory: $(wwwrootDir)
+
+  - task: PowerShell@2
+    displayName: CodeQL Setup
+    inputs:
+      targetType: inline
+      script: |
+        Write-Host "DOWNLOADING CODEQL LINUX BUNDLE"
+        cd $(System.DefaultWorkingDirectory)
+        Invoke-WebRequest -uri https://github.com/github/codeql-action/releases/latest/download/codeql-bundle-linux64.tar.gz -OutFile $(System.DefaultWorkingDirectory)\codeql-bundle-linux64.tar.gz
+        tar -xvzf ./codeql-bundle-linux64.tar.gz
+     # Invoke-WebRequest -uri https://github.com/github/codeql-action/releases/latest/download/codeql-bundle-linux64.tar.gz -OutFile $(System.DefaultWorkingDirectory)\codeql-bundle-linux64.tar.gz
+
+  - task: PowerShell@2
+    displayName: CodeQL Initialisation
+    inputs:
+      targetType: inline
+      script: |
+        Write-Host "CREATING CODEQL DATABASE"
+        & $(System.DefaultWorkingDirectory)/codeql/codeql database create $(System.DefaultWorkingDirectory)/codeql-database --language=csharp
+        #dotnet restore **/*.sln
+        #dotnet build **/*.csproj --configuration $(BuildConfiguration) --no-restore
+
+  - task: PowerShell@2
+    displayName: CodeQL Analysis
+    inputs:
+      targetType: inline
+      script: |
+        Write-host "PERFORMING CODEQL ANALYSIS"
+        New-Item -ItemType "directory" -Path $(System.DefaultWorkingDirectory)/codeql-sarif
+        New-Item -ItemType "directory" -Path $(System.DefaultWorkingDirectory)/codeql-sarif/code-scanning-alerts.sarif
+        & $(System.DefaultWorkingDirectory)/codeql/codeql database analyze $(System.DefaultWorkingDirectory)/codeql-database $(System.DefaultWorkingDirectory)/codeql/qlpacks/codeql-csharp/codeql-suites/csharp-code-scanning.qls --format=sarif-latest --output=$(System.DefaultWorkingDirectory)\codeql-sarif\code-scanning-alerts.sarif
+
+  - task: PowerShell@2
+    displayName: Upload CodeQL Results
+    inputs:
+      targetType: inline
+      script: |
+        Write-host "UPLOAD CODEQL RESULTS"
+        & $(System.DefaultWorkingDirectory)/codeql/codeql github upload-results --repository=octodemo/rerwinx-tailspin-spacegame --ref=$(Build.SourceBranch) --commit=$(Build.SourceVersion) --sarif=$(System.DefaultWorkingDirectory)/codeql-sarif/code-scanning-alerts.sarif --github-auth-stdin=$(MY_GITHUB_TOKEN)
+
+  #- task: DotNetCoreCLI@2
+  #  displayName: "Restore project dependencies"
+  #  inputs:
+  #    command: "restore"
+  #    projects: "**/*.csproj"
+
+  #- task: DotNetCoreCLI@2
+  #  displayName: "Build the project - $(buildConfiguration)"
+  #  inputs:
+  #    command: "build"
+  #    arguments: "--no-restore --configuration $(buildConfiguration)"
+  #    projects: "**/*.csproj"
+
+  - task: DotNetCoreCLI@2
+    displayName: "Publish the project - $(buildConfiguration)"
+    inputs:
+      command: "publish"
+      projects: "**/*.csproj"
+      publishWebProjects: false
+      arguments: "--no-build --configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)/$(buildConfiguration)"
+      zipAfterPublish: true
+
+  - task: PublishBuildArtifacts@1
+    displayName: "Publish Artifact: drop"
+    condition: succeeded()
